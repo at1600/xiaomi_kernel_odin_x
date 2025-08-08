@@ -182,3 +182,4 @@ Add the following code before the last line of this file
         CONFIG_AKSYS_QRD_FF=y
 # xiaomi_kernel_odin-sm8350-
 # xiaomi_kernel_odin-sm8350-
+# xiaomi_kernel_odin_x
