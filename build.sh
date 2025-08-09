@@ -21,7 +21,7 @@ echo -e "${YELLOW}==================================================${NC}"
 
 # 文件路径
 CURRENT_DIR=$(pwd)
-KERNEL_DIR="${CURRENT_DIR}/xiaomi_kernel_odin"
+KERNEL_DIR="${CURRENT_DIR}/xiaomi_kernel_odin_x"
 CLANG_DIR="${KERNEL_DIR}/scripts/tools/clang-r383902b1"
 GCC64_DIR="${KERNEL_DIR}/scripts/tools/aarch64-linux-android-4.9"
 GCC_DIR="${KERNEL_DIR}/scripts/tools/arm-linux-androideabi-4.9"
@@ -43,10 +43,10 @@ DEFCONFIG="odin_defconfig"
 # 文件名称
 if [ -d ".git" ]; then
 GIT_COMMIT_HASH=$(git rev-parse --short=7 HEAD)
-ZIP_NAME="MIX4-5.4.281-g${GIT_COMMIT_HASH}.zip"
+ZIP_NAME="MIX4-5.4.281X-g${GIT_COMMIT_HASH}.zip"
 else
 CURRENT_TIME=$(date '+%Y%m%d%H%M')
-ZIP_NAME="MIX4-5.4.281-${CURRENT_TIME}.zip"
+ZIP_NAME="MIX4-5.4.281X-${CURRENT_TIME}.zip"
 fi
 
 # 安装依赖
