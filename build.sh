@@ -5,7 +5,7 @@
 # Ensure the script exits on error
 set -e
 
-TOOLCHAIN_PATH=$HOME/zyc-clang/bin
+TOOLCHAIN_PATH=$HOME/proton-clang/proton-clang-20210522/bin
 GIT_COMMIT_ID=$(git rev-parse --short=8 HEAD)
 TARGET_DEVICE=$1
 
@@ -85,7 +85,7 @@ clang --version
 KSU_ZIP_STR=NoKernelSU
 if [ "$2" == "ksu" ]; then
     KSU_ENABLE=1
-    KSU_ZIP_STR=ReSukiSU-SuSFS
+    KSU_ZIP_STR=KernelSU
 else
     KSU_ENABLE=0
 fi
@@ -95,22 +95,25 @@ echo "TARGET_DEVICE: $TARGET_DEVICE"
 
 if [ $KSU_ENABLE -eq 1 ]; then
     echo "KSU is enabled"
-    curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+    curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
 else
     echo "KSU is disabled"
 fi
 
-echo "Integrating Baseband-guard..."
-curl -LSs "https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh" | bash
-sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
 
 echo "Cleaning..."
 
 rm -rf out/
 rm -rf anykernel/
 
-echo "Clone AnyKernel3 for packing kernel (repo: https://github.com/AstideLabs/AnyKernel3)"
-git clone https://github.com/AstideLabs/AnyKernel3 -b master --single-branch --depth=1 anykernel
+echo "Clone AnyKernel3 for packing kernel (repo: https://github.com/liyafe1997/AnyKernel3)"
+git clone https://github.com/liyafe1997/AnyKernel3 -b kona --single-branch --depth=1 anykernel
+
+# Add date to local version
+local_version_str="-perf"
+local_version_date_str="-$(date +%Y%m%d)-${GIT_COMMIT_ID}-perf"
+
+sed -i "s/${local_version_str}/${local_version_date_str}/g" arch/arm64/configs/${TARGET_DEVICE}_defconfig
 
 # ------------- Building for AOSP -------------
 
@@ -118,31 +121,10 @@ echo "Building for AOSP......"
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
 if [ $KSU_ENABLE -eq 1 ]; then
-    scripts/config --file out/.config \
-    -e KSU \
-    -e THREAD_INFO_IN_TASK \
-    -e KSU_SUSFS \
-    -e KSU_SUSFS_SUS_PATH \
-    -e KSU_SUSFS_SUS_MOUNT \
-    -e KSU_SUSFS_SUS_KSTAT \
-    -e KSU_SUSFS_SPOOF_UNAME \
-    -e KSU_SUSFS_ENABLE_LOG \
-    -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-    -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-    -e KSU_SUSFS_OPEN_REDIRECT \
-    -e KSU_SUSFS_SUS_MAP \
-    -e KSU_MULTI_MANAGER_SUPPORT \
-    -e KPM
+    scripts/config --file out/.config -e KSU
 else
     scripts/config --file out/.config -d KSU
 fi
-
-scripts/config --file out/.config \
-    -e BBG
-
-scripts/config --file out/.config \
-    -e REKERNEL \
-    -e REKERNEL_NETWORK
 
 make $MAKE_ARGS -j$(nproc)
 
@@ -159,26 +141,14 @@ find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + >out/arch/arm64/boot/d
 
 rm -rf anykernel/kernels/
 
-mkdir -p anykernel/kernels/aosp/
+mkdir -p anykernel/kernels/
 
-# Patch for SukiSU KPM support. 
-if [ $KSU_ENABLE -eq 1 ]; then
-    cd out/arch/arm64/boot/
-    wget https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.13.0/patch_linux
-    chmod +x patch_linux
-    ./patch_linux
-    rm Image
-    mv oImage Image
-    cd -
-fi
-
-cp out/arch/arm64/boot/Image anykernel/kernels/aosp/
-cp out/arch/arm64/boot/dtb anykernel/kernels/aosp/
-cp out/arch/arm64/boot/dtbo.img anykernel/kernels/aosp/
+cp out/arch/arm64/boot/Image anykernel/kernels/
+cp out/arch/arm64/boot/dtb anykernel/kernels/
 
 cd anykernel 
 
-ZIP_FILENAME=APTKernel_AOSP_${TARGET_DEVICE}_${KSU_ZIP_STR}_$(date +'%Y%m%d_%H%M%S')_anykernel3_${GIT_COMMIT_ID}.zip
+ZIP_FILENAME=Kernel_AOSP_${TARGET_DEVICE}_${KSU_ZIP_STR}_$(date +'%Y%m%d_%H%M%S')_anykernel3_${GIT_COMMIT_ID}.zip
 
 zip -r9 $ZIP_FILENAME ./* -x .git .gitignore out/ ./*.zip
 
@@ -261,33 +231,18 @@ sed -i 's/\/\/39 01 00 00 11 00 03 51 03 FF/39 01 00 00 11 00 03 51 03 FF/g' ${d
 make $MAKE_ARGS ${TARGET_DEVICE}_defconfig
 
 if [ $KSU_ENABLE -eq 1 ]; then
-    scripts/config --file out/.config \
-    -e KSU \
-    -e THREAD_INFO_IN_TASK \
-    -e KSU_SUSFS \
-    -e KSU_SUSFS_SUS_PATH \
-    -e KSU_SUSFS_SUS_MOUNT \
-    -e KSU_SUSFS_SUS_KSTAT \
-    -e KSU_SUSFS_SPOOF_UNAME \
-    -e KSU_SUSFS_ENABLE_LOG \
-    -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-    -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-    -e KSU_SUSFS_OPEN_REDIRECT \
-    -e KSU_SUSFS_SUS_MAP \
-    -e KSU_MULTI_MANAGER_SUPPORT \
-    -e KPM
+    scripts/config --file out/.config -e KSU
 else
     scripts/config --file out/.config -d KSU
 fi
 
-scripts/config --file out/.config \
-    -e BBG
 
 scripts/config --file out/.config \
     --set-str STATIC_USERMODEHELPER_PATH /system/bin/micd \
     -e PERF_CRITICAL_RT_TASK	\
     -e SF_BINDER		\
     -e OVERLAY_FS		\
+    -d DEBUG_FS \
     -e MIGT \
     -e MIGT_ENERGY_MODEL \
     -e MIHW \
@@ -297,22 +252,23 @@ scripts/config --file out/.config \
     -e MILLET \
     -e PERF_HUMANTASK \
     -d LTO_CLANG \
-    -e LTO_NONE \
-    -d SHADOW_CALL_STACK \
+    -d LOCALVERSION_AUTO \
     -e SF_BINDER \
     -e XIAOMI_MIUI \
     -d MI_MEMORY_SYSFS \
     -e TASK_DELAY_ACCT \
     -e MIUI_ZRAM_MEMORY_TRACKING \
+    -d CONFIG_MODULE_SIG_SHA512 \
+    -d CONFIG_MODULE_SIG_HASH \
     -e MI_FRAGMENTION \
     -e PERF_HELPER \
     -e BOOTUP_RECLAIM \
     -e MI_RECLAIM \
     -e RTMM \
-    -d REKERNEL \
-    -d REKERNEL_NETWORK
 
 make $MAKE_ARGS -j$(nproc)
+
+
 
 if [ -f "out/arch/arm64/boot/Image" ]; then
     echo "The file [out/arch/arm64/boot/Image] exists. MIUI Build successfully."
@@ -330,24 +286,15 @@ rm -rf ${dts_source}
 mv .dts.bak ${dts_source}
 
 rm -rf anykernel/kernels/
-mkdir -p anykernel/kernels/miui/
+mkdir -p anykernel/kernels/
 
-# Patch for SukiSU KPM support. 
-if [ $KSU_ENABLE -eq 1 ]; then
-    cd out/arch/arm64/boot/
-    wget https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.13.0/patch_linux
-    chmod +x patch_linux
-    ./patch_linux
-    rm Image
-    mv oImage Image
-    cd -
-fi
-
-cp out/arch/arm64/boot/Image anykernel/kernels/miui/
-cp out/arch/arm64/boot/dtb anykernel/kernels/miui/
-cp out/arch/arm64/boot/dtbo.img anykernel/kernels/miui/
+cp out/arch/arm64/boot/Image anykernel/kernels/
+cp out/arch/arm64/boot/dtb anykernel/kernels/
 
 echo "Build for MIUI finished."
+
+# Restore local version string
+sed -i "s/${local_version_date_str}/${local_version_str}/g" arch/arm64/configs/${TARGET_DEVICE}_defconfig
 
 # ------------- End of Building for MIUI -------------
 #  If you don't need MIUI you can comment out the above block [Building for MIUI]
@@ -355,7 +302,7 @@ echo "Build for MIUI finished."
 
 cd anykernel 
 
-ZIP_FILENAME=APTKernel_MIUI_${TARGET_DEVICE}_${KSU_ZIP_STR}_$(date +'%Y%m%d_%H%M%S')_anykernel3_${GIT_COMMIT_ID}.zip
+ZIP_FILENAME=Kernel_MIUI_${TARGET_DEVICE}_${KSU_ZIP_STR}_$(date +'%Y%m%d_%H%M%S')_anykernel3_${GIT_COMMIT_ID}.zip
 
 zip -r9 $ZIP_FILENAME ./* -x .git .gitignore out/ ./*.zip
 
