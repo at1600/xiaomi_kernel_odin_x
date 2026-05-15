@@ -1,100 +1,655 @@
 name: Build Kernel
+permissions:
+  contents: write
+  actions: write
 
 on:
   workflow_dispatch:
     inputs:
-      device:
-        description: 'Target Device Codename (e.g., lmi, umi)'
+      target_devices:
+        description: 'target device (目标设备)'
         required: true
-        default: 'lmi'
         type: choice
         options:
-          - psyche
-          - thyme
-          - umi
-          - munch
-          - lmi
-          - cmi
-          - cas
-          - apollo
-          - alioth
-          - elish
-          - enuma
-          - dagu
-          - pipa
-
-      script:
-        description: 'Select Build Script'
+          - 'lmi'
+          - 'cmi'
+          - 'cas'
+          - 'thyme'
+          - 'munch'
+          - 'dagu'
+          - 'elish'
+          - 'enuma'
+          - 'alioth'
+          - 'apollo'
+          - 'umi'
+          - 'psyche'
+          - 'pipa'
+          - 'all'
+      compiled_system:
+        description: 'Applicable systems (适用系统)'
         required: true
-        default: 'build.sh'
         type: choice
+        default: 'MIUI'
         options:
-          - build.sh
-          - build-miui.sh
-
-      ksu:
-        description: 'Enable KernelSU (ReSukiSU-SuSFS)'
+          - 'MIUI'
+          - 'AOSP'
+      lxc_enable:
+        description: 'Is LXC support enabled? (是否启用 LXC 支持?)'
         required: true
-        type: boolean
-        default: true
+        type: choice
+        default: 'enable'
+        options:
+          - 'enable'
+          - 'disable'
+      kernel_version:
+        description: 'Customizing the kernel version number (自定义内核版本号)'
+        required: false
+        type: string
+        default: ''
+      build_type:
+        description: 'Kernel Build Type (内核构建类型)'
+        required: true
+        type: choice
+        default: 'Release'
+        options:
+          - 'Release'
+          - 'Dev'
+
+env:
+  TZ: Asia/Shanghai
+  kernelsu_variant: SukiSU-Ultra
 
 jobs:
-  build:
-    name: Build Kernel for ${{ inputs.device }} (${{ inputs.script }}) (${{ inputs.ksu && 'KSU' || 'NoKSU' }})
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          DEVICES="${{ github.event.inputs.target_devices }}"
+          if [ "$DEVICES" == "all" ]; then
+            DEVICES="umi,cmi,cas,thyme,munch,dagu,elish,enuma,alioth,apollo,lmi,psyche,pipa"
+          fi
+          DEVICES_JSON="[$(echo $DEVICES | sed 's/,/","/g' | sed 's/.*/"&"/')]"
+          echo "matrix={\"device\":$DEVICES_JSON}" >> $GITHUB_OUTPUT
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    strategy:
+      matrix: ${{fromJson(needs.prepare.outputs.matrix)}}
+      fail-fast: false
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+      WORKDIR: "${{ github.workspace }}"
+      KERNEL_SOURCE: "${{ github.workspace }}/kernel_source"
+      TOOLCHAIN_DIR: "${{ github.workspace }}/toolchain"
+      DEVICE: "${{ matrix.device }}"
 
     steps:
-    - name: Checkout Source
-      uses: actions/checkout@v6
+      - name: 📢 Build Information (构建信息)
+        run: |
+          echo "设备: ${DEVICE} | 系统: ${{ github.event.inputs.compiled_system }}"
+          echo "构建类型: ${{ github.event.inputs.build_type }}"
+
+      - name: 🚀 Maximize build space (最大化构建空间)
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          swap-size-mb: 8192
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+
+      - name: 📦 Installation of dependencies (安装依赖)
+        run: |
+          echo "正在安装构建依赖..."
+          sudo apt update && sudo apt upgrade -y
+          sudo apt install -y \
+            bc binutils-dev bison build-essential ca-certificates ccache cmake curl file flex \
+            git libelf-dev libssl-dev make ninja-build python3-dev texinfo u-boot-tools xz-utils \
+            zlib1g-dev libncurses-dev wget zip cpio python3 python3-pip tree gcc clang lld llvm jq
+          echo "✅ Dependency installation complete (依赖安装完成)"
+          
+      - name: ⚙️ Configuring ccache (配置 ccache)
+        run: |
+          mkdir -p ~/.cache
+          ccache --version
+          ccache --max-size=4G
+          ccache --set-config=compression=true
+          ccache --zero-stats
+          echo "CCACHE_DIR=$HOME/.cache" >> $GITHUB_ENV
+          
+      - name: 📥 Restore ccache (恢复 ccache 缓存)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache
+          key: ccache-${{ github.event.inputs.compiled_system }}-${{ hashFiles('**/Makefile') }}
+          restore-keys: |
+            ccache-${{ github.event.inputs.compiled_system }}-
+            ccache-
+            
+      - name: 📥 Cloning kernel source code （克隆内核源码）
+        run: |
+          echo "正在克隆内核源码..."
+          rm -rf $KERNEL_SOURCE
+          git clone https://github.com/cctv18/kernel_xiaomi_sm8250_mod.git -b android14-lineage22-mod --depth=1 $KERNEL_SOURCE
+          echo "✅ Kernel source code cloning complete (内核源码克隆完成)"
+
+      - name: 📥 Caching toolchain (缓存工具链)
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TOOLCHAIN_DIR }}
+          key: toolchain-clang-r547379-gcc-${{ hashFiles('**/*.sh') }}
+          restore-keys: |
+            toolchain-clang-r547379-gcc-
+            toolchain-
+            
+      - name: 📥 Download the compilation toolchain (下载编译工具链)
+        if: steps.cache-toolchain.outputs.cache-hit == 'null'
+        run: |
+          echo "正在下载编译工具链..."
+          # 创建工具链目录
+          #rm -rf "$TOOLCHAIN_DIR/clang"
+          #rm -rf "$TOOLCHAIN_DIR/gcc/gcc64"
+          #rm -rf "$TOOLCHAIN_DIR/gcc/gcc32"
+          mkdir -p "$TOOLCHAIN_DIR/clang"
+          mkdir -p "$TOOLCHAIN_DIR/gcc/gcc64"
+          mkdir -p "$TOOLCHAIN_DIR/gcc/gcc32"
+          
+          # 下载 Clang
+          echo "正在下载 Clang..."
+          cd "$TOOLCHAIN_DIR/clang"
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz -O clang-r547379.tar.gz
+          tar -xzf clang-r547379.tar.gz
+          rm clang-r547379.tar.gz
+          
+          # 下载 GCC
+          echo "正在下载 GCC工具链..."
+          cd "$TOOLCHAIN_DIR/gcc/gcc64"
+          git init
+          git remote add origin https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git
+          git fetch --depth 1 origin
+          git checkout FETCH_HEAD
+          
+          cd "$TOOLCHAIN_DIR/gcc/gcc32"
+          git init
+          git remote add origin https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git
+          git fetch --depth 1 origin
+          git checkout FETCH_HEAD
+          
+          echo "✅ Toolchain download complete (工具链下载完成)"
+
+      - name: ⚙️ Configuring KernelSU (配置 KernelSU)
+        run: |
+          cd "$KERNEL_SOURCE"
+          
+          KSU_VARIANT="SukiSU-Ultra"
+          
+          echo "⚙️ KernelSU Version: $KSU_VARIANT (KernelSU 版本: $KSU_VARIANT)"
+          
+          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/susfs-main/kernel/setup.sh" | bash -s susfs-main
+          
+          echo "✅ $KSU_VARIANT configuration complete ($KSU_VARIANT 配置完成)"
+
+      - name: 🛠️ Setup LXC (安装 LXC 补丁)
+        run: |
+          LXC_ENABLE="${{ github.event.inputs.lxc_enable }}"
+          if [ "$LXC_ENABLE" == "enable" ]; then
+            echo "🛠️ 正在为内核安装 LXC 补丁..."
+            
+            cd $KERNEL_SOURCE
+            echo 'source "utils/Kconfig"' >> "Kconfig"
+            rm -rf utils
+            git clone https://github.com/cctv18/lxc-docker-support-for-android.git utils
+ 
+            echo "CONFIG_DOCKER=y" >> arch/arm64/configs/${DEVICE}_defconfig
+ 
+            sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' arch/arm64/configs/${DEVICE}_defconfig
+            echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> arch/arm64/configs/${DEVICE}_defconfig
+ 
+            #sed -i '/CONFIG_LOCALVERSION/d' arch/arm64/configs/${DEVICE}_defconfig
+            #echo 'CONFIG_LOCALVERSION="-LXC-KernelSU-support_Pdx"' >> arch/arm64/configs/${DEVICE}_defconfig
+ 
+            chmod +x $KERNEL_SOURCE/utils/runcpatch.sh
+ 
+            if [ -f $KERNEL_SOURCE/kernel/cgroup/cgroup.c ]; then
+                sh $KERNEL_SOURCE/utils/runcpatch.sh $KERNEL_SOURCE/kernel/cgroup/cgroup.c
+            fi
+ 
+            if [ -f $KERNEL_SOURCE/kernel/cgroup.c ]; then
+                sh $KERNEL_SOURCE/utils/runcpatch.sh $KERNEL_SOURCE/kernel/cgroup.c
+            fi
+ 
+            if [ -f $KERNEL_SOURCE/net/netfilter/xt_qtaguid.c ]; then
+                patch -p0 < $KERNEL_SOURCE/utils/xt_qtaguid.patch
+            fi
+            
+          else 
+            echo "ℹ️ LXC is not enabled. (LXC 未启用)"
+          fi
+
+      - name: 🛠️ Setup patches for SukiSU (为 SukiSU 安装补丁)
+        run: |
+          cd "$KERNEL_SOURCE"
+          echo "Applying patches for SukiSU..."
+          
+          #SUSFS for SukiSU 补丁：
+          git clone https://github.com/ShirkNeko/susfs4ksu.git -b kernel-4.19
+          cp ./susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch ./
+          cp ./susfs4ksu/kernel_patches/fs/* ./fs/
+          cp ./susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+          patch -p1 -F 3 < 50_add_susfs_in_kernel-4.19.patch || true
+          
+          #内核钩子补丁：
+          git clone https://github.com/ShirkNeko/SukiSU_patch.git
+          cp ./SukiSU_patch/4.19/ksu_hooks_sukisu_4.19.patch ./
+          patch -p1 -F 3 < ksu_hooks_sukisu_4.19.patch || true
+          
+          #特征隐藏补丁：
+          cp ./SukiSU_patch/69_hide_stuff.patch ./
+          patch -p1 -F 3 < 69_hide_stuff.patch || true
+          
+          echo "补丁完成！"
+          
+      - name: 🔨 Build the kernel (构建内核)
+        run: |
+          cd "$KERNEL_SOURCE"
+          
+          # 设置环境变量
+          export PATH="$TOOLCHAIN_DIR/clang/bin:$PATH"
+          
+          # 定义构建参数
+          MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=$TOOLCHAIN_DIR/gcc/gcc64/bin/aarch64-linux-android- \
+            CROSS_COMPILE_COMPAT=$TOOLCHAIN_DIR/gcc/gcc32/bin/arm-linux-androideabi- \
+            CROSS_COMPILE_ARM32=$TOOLCHAIN_DIR/gcc/gcc32/bin/arm-linux-androideabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            LD=ld.lld HOSTLD=ld.lld \
+            KCFLAGS=-Wno-error \
+            O=out"
+          
+          # 获取参数
+          SYSTEM="${{ github.event.inputs.compiled_system }}"
+          #KSU="${{ github.event.inputs.kernelsu_variant }}"
+          #KPM="${{ github.event.inputs.kpm_enable }}"
+          VERSION="${{ github.event.inputs.kernel_version }}"
+          
+          # 生成设备配置
+          echo "🔧 Generating ${DEVICE} configuration... (正在生成 ${DEVICE} 的配置)"
+          make $MAKE_ARGS -j$(nproc --all) ${DEVICE}_defconfig
+          
+          # 开启一些附加优化配置
+          echo "🔧 Applying basic optimized configurations... (应用基本优化配置)"
+          scripts/config --file out/.config \
+            -e KALLSYMS \
+            -e KALLSYMS_ALL \
+            -e KPROBES \
+            -e HAVE_KPROBES \
+            -e KPROBE_EVENTS \
+            -e TMPFS_XATTR=y \
+            -e TMPFS_POSIX_ACL \
+            -e IP_NF_TARGET_TTL \
+            -e IP6_NF_TARGET_HL \
+            -e IP6_NF_MATCH_HL \
+            -e UCLAMP_TASK \
+            -e TCP_CONG_ADVANCED \
+            -e TCP_CONG_BIC \
+            -e TCP_CONG_CUBIC \
+            -e TCP_CONG_WESTWOOD \
+            -e TCP_CONG_HTCP \
+            -e TCP_CONG_HSTCP \
+            -e TCP_CONG_HYBLA \
+            -e TCP_CONG_VEGAS \
+            -e TCP_CONG_NV \
+            -e TCP_CONG_SCALABLE \
+            -e TCP_CONG_LP \
+            -e TCP_CONG_VENO \
+            -e TCP_CONG_YEAH \
+            -e TCP_CONG_ILLINOIS \
+            -e TCP_CONG_DCTCP \
+            -e TCP_CONG_CDG \
+            -e TCP_CONG_BBR \
+            -e DEFAULT_BBR \
+            -e NET_SCHED \
+            -e NET_SCH_HTB \
+            -e NET_SCH_HFSC \
+            -e NET_SCH_PRIO \
+            -e NET_SCH_MULTIQ \
+            -e NET_SCH_RED \
+            -e NET_SCH_SFB \
+            -e NET_SCH_SFQ \
+            -e NET_SCH_TEQL \
+            -e NET_SCH_TBF \
+            -e NET_SCH_CBS \
+            -e NET_SCH_ETF \
+            -e NET_SCH_TAPRIO \
+            -e NET_SCH_GRED \
+            -e NET_SCH_NETEM \
+            -e NET_SCH_DRR \
+            -e NET_SCH_MQPRIO \
+            -e NET_SCH_SKBPRIO \
+            -e NET_SCH_CHOKE \
+            -e NET_SCH_QFQ \
+            -e NET_SCH_CODEL \
+            -e NET_SCH_FQ_CODEL \
+            -e NET_SCH_CAKE \
+            -e NET_SCH_FQ \
+            -e NET_SCH_HHF \
+            -e NET_SCH_PIE \
+            -e NET_SCH_FQ_PIE \
+            -e NET_SCH_INGRESS \
+            -e NET_SCH_PLUG \
+            -e NET_SCH_ETS \
+            -e NET_SCH_FIFO \
+            -e NET_SCH_DEFAULT \
+            -e DEFAULT_FQ \
+            -e MQ_IOSCHED_DEADLINE \
+            -e MQ_IOSCHED_KYBER \
+            -e IOSCHED_BFQ \
+            -e BFQ_GROUP_IOSCHED \
+            -e ENERGY_MODEL \
+            -e CPU_IDLE \
+            -e CPU_IDLE_GOV_MENU \
+            -e CPU_IDLE_GOV_TEO \
+            -e ARM_PSCI_CPUIDLE \
+            -e CPU_FREQ \
+            -e CPU_FREQ_STAT \
+            -e CPU_FREQ_TIMES \
+            -e CPU_FREQ_GOV_POWERSAVE \
+            -e CPU_FREQ_GOV_CONSERVATIVE \
+            -e CPU_FREQ_GOV_USERSPACE \
+            -e CPU_FREQ_GOV_ONDEMAND \
+            -e ZRAM \
+            -e ZSMALLOC \
+            -e ZRAM_WRITEBACK \
+            -e CRYPTO_LZ4 \
+            -e CRYPTO_LZ4HC \
+            -e CRYPTO_LZ4K \
+            -e CRYPTO_LZ4KD \
+            -e CRYPTO_ZSTD \
+            -e CRYPTO_842 \
+            -e CRYPTO_LZO \
+            -e CRYPTO_DEFLATE \
+            -e ZRAM_DEF_COMP_LZ4KD \
+            -e SWAP \
+            -e ZSWAP \
+            -e ANDROID_SIMPLE_LMK \
+            -e CPU_FREQ_GOV_SCHEDHORIZON \
+            -e CPU_FREQ_DEFAULT_GOV_SCHEDHORIZON \
+            --set-val LITTLE_CPU_MASK 15 \
+            --set-val BIG_CPU_MASK 112 \
+            --set-val PRIME_CPU_MASK 128 \
+            -e LRU_GEN \
+            -e LRU_GEN_ENABLED \
+            -e NTFS_FS \
+            -e NTFS_RW \
+            -e EXFAT_FS \
+            -e EROFS_FS \
+            -e EROFS_FS_XATTR \
+            -e EROFS_FS_ZIP \
+            -d ANDROID_PARANOID_NETWORK \
+            -e PSTORE_LAST_KMSG
+
+          # 根据系统类型修改配置
+          if [ "$SYSTEM" == "MIUI" ]; then
+              echo "🔧 Apply MIUI specific configurations... (应用 MIUI 特定配置)"
+              scripts/config --file out/.config \
+                  --set-str STATIC_USERMODEHELPER_PATH /system/bin/micd \
+                  -e PERF_CRITICAL_RT_TASK \
+                  -e SF_BINDER \
+                  -e OVERLAY_FS \
+                  -d DEBUG_FS \
+                  -e MIGT \
+                  -e MIGT_ENERGY_MODEL \
+                  -e MIHW \
+                  -e PACKAGE_RUNTIME_INFO \
+                  -e BINDER_OPT \
+                  -e KPERFEVENTS \
+                  -e MILLET \
+                  -e PERF_HUMANTASK \
+                  -d LTO_CLANG \
+                  -d LOCALVERSION_AUTO \
+                  -e SF_BINDER \
+                  -e XIAOMI_MIUI \
+                  -d MI_MEMORY_SYSFS \
+                  -e TASK_DELAY_ACCT \
+                  -e MIUI_ZRAM_MEMORY_TRACKING \
+                  -d CONFIG_MODULE_SIG_SHA512 \
+                  -d CONFIG_MODULE_SIG_HASH \
+                  -e MI_FRAGMENTION \
+                  -e PERF_HELPER \
+                  -e BOOTUP_RECLAIM \
+                  -e MI_RECLAIM \
+                  -e RTMM
+          fi
+
+          if [ "$LXC_ENABLE" == "enable" ]; then
+              scripts/config --file out/.config \
+                  -d PERF_HUMANTASK
+          fi
+            
+          # 添加 KSU 配置
+          echo "🔧 Applying SukiSU-Ultra Configuration... (应用 SukiSU-Ultra 配置)"
+          scripts/config --file out/.config \
+              -e KSU \
+              -e KPM \
+              -e KSU_MANUAL_HOOK \
+              -e KSU_SUSFS \
+              -e KSU_SUSFS_HAS_MAGIC_MOUNT \
+              -e KSU_SUSFS_SUS_PATH \
+              -e KSU_SUSFS_SUS_MOUNT \
+              -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+              -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+              -e KSU_SUSFS_SUS_KSTAT \
+              -d KSU_SUSFS_SUS_OVERLAYFS \
+              -e KSU_SUSFS_TRY_UMOUNT \
+              -e KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
+              -e KSU_SUSFS_SPOOF_UNAME \
+              -e KSU_SUSFS_ENABLE_LOG \
+              -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+              -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+              -e KSU_SUSFS_OPEN_REDIRECT \
+              -d KSU_SUSFS_SUS_SU
+            
+          # 判断KPM是否启用并开启相关配置
+          #if [ "$KSU" == "SukiSU-Ultra" ] && [ "$KPM" == "enable" ]; then
+          #    echo "🔧 Enabling KPM Configuration... (开启 KPM 配置)"
+          #    scripts/config --file out/.config \
+          #        -e KPM
+          #fi
+            
+          # 修改内核版本号
+          if [ ! -z "$VERSION" ]; then
+              echo "🔧 设置自定义内核版本: $VERSION"
+              sed -i "s/-dirty/-$VERSION/g" scripts/setlocalversion
+          else
+              echo "🔧 使用默认版本后缀: -Yun"
+              sed -i "s/-dirty/-Yun/g" scripts/setlocalversion
+          fi
+
+          FULL_VERSION="$VERSION"
+          if [ ! -z "$FULL_VERSION" ]; then
+            main_version=$(echo "$FULL_VERSION" | grep -oE '^[0-9]+(\.[0-9]+)*')
+            custom_part=$(echo "$FULL_VERSION" | grep -oE '(-[a-zA-Z0-9]+)*$')
+            makefile_path="$KERNEL_SOURCE/Makefile"
+            IFS='.' read -ra version_parts <<< "$main_version"
+            sed -i "2s/.*/VERSION = ${version_parts[0]}/" "$makefile_path"
+            if [ -n "${version_parts[1]}" ]; then
+              sed -i "3s/.*/PATCHLEVEL = ${version_parts[1]}/" "$makefile_path"
+            fi
+            if [ -n "${version_parts[2]}" ]; then
+              sed -i "4s/.*/SUBLEVEL = ${version_parts[2]}/" "$makefile_path"
+            fi
+
+            sed -i "s/echo \"\$res\"/echo \"${custom_part}\"/g" "$KERNEL_SOURCE/scripts/setlocalversion"
+          fi
+            
+          # 开始构建
+          echo "🚀 Start building the kernel... (开始构建内核)"
+          make $MAKE_ARGS -j$(nproc --all) 2>&1 | tee build.log
+            
+          # 验证构建结果
+          if [ -f "$KERNEL_SOURCE/out/arch/arm64/boot/Image" ]; then
+              echo "✅ Kernel Build Successful (内核构建成功)"
+          else
+              echo "❌ Kernel build failure (内核构建失败)"
+              echo "error log (错误日志):"
+              tail -n 100 build.log
+              exit 1
+          fi
+            
+          # 显示 ccache 统计信息
+          echo "📊 CCache Statistics (CCache 统计信息):"
+          ccache --show-stats
+
+      - name: 🛠️ KPM Patching Image Files (KPM 修补 Image 文件)
+        run: |
+          #KSU_VARIANT="${{ github.event.inputs.kernelsu_variant }}"
+          #KPM_ENABLE="${{ github.event.inputs.kpm_enable }}"
+          
+          #if [ "$KSU_VARIANT" == "SukiSU-Ultra" ] && [ "$KPM_ENABLE" == "enable" ]; then
+            echo "🛠️ 正在修补 Image 文件..."
+            cd "$KERNEL_SOURCE/out/arch/arm64/boot"
+            curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch
+            chmod 777 patch
+            ./patch
+            if [ $? -eq 0 ]; then
+              rm -f Image
+              mv oImage Image
+              echo "✅ Image file repair complete (Image 文件修补完成)"
+            else
+              echo "❌ KPM Patch Failed, Use Original Image (KPM 修补失败，使用原始 Image)"
+            fi
+          #else 
+          #  echo "ℹ️ KPM is not enabled or KernelSU variants do not support KPM. (KPM 未启用或 KernelSU 变体不支持 KPM)"
+          #fi
+
+      - name: 📝 Setting Version Variables (设置版本变量)
+        run: |
+          cd "$KERNEL_SOURCE"
+          
+          # 获取 Git Commit 哈希值
+          GIT_COMMIT_SHORT=$(git rev-parse --short=6 HEAD)
+          echo "GIT_COMMIT_ID=$GIT_COMMIT_SHORT" >> $GITHUB_ENV
+          
+          # 获取日期
+          BUILD_DATE=$(date +%Y%m%d)
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+
+      - name: 📦 Package kernel to AnyKernel3 (打包内核到 AnyKernel3)
+        run: |
+          # 定义变量
+          SYSTEM="${{ github.event.inputs.compiled_system }}"
+          KSU="SukiSU-Ultra"
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          BUILD_ID="${{ env.GIT_COMMIT_ID }}"
+          BUILD_DATE="${{ env.BUILD_DATE }}"
+          BUILD_VER="${{ github.event.inputs.kernel_version }}"
+          ZIP_NAME="${DEVICE}_${KSU}_${SYSTEM}_${BUILD_DATE}_${BUILD_VER}.zip"
+          
+          echo "📦 Create AnyKernel3 package (创建 AnyKernel3 刷机包)"
+          
+          # 创建目录并克隆 AnyKernel3
+          mkdir -p "$WORKDIR/ak3_out"
+          cd "$WORKDIR/ak3_out"
+          git clone https://github.com/liyafe1997/AnyKernel3.git --depth=1
+          cd AnyKernel3
+          # 删除不需要的文件
+          rm -rf .git .github README.md
+          # 复制内核镜像
+          cp "$KERNEL_SOURCE/out/arch/arm64/boot/Image" ./
+          # 打包
+          echo "📦 Flashing package being created (正在创建刷机包): $ZIP_NAME"
+          zip -r "$ZIP_NAME" ./
+          
+          if [ -f "$ZIP_NAME" ]; then
+            echo "✅ Flip package created successfully (刷机包创建成功): $ZIP_NAME"
+            ls -lh "$ZIP_NAME"
+            mv "$ZIP_NAME" ../
+          else
+            echo "❌ Brush package creation failed (刷机包创建失败)"
+            exit 1
+          fi
+          
+      - name: 📤 Upload compilation results (上传编译结果)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-${{ matrix.device }}
+          path: ${{ github.workspace }}/ak3_out/*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: 📥 Download all zip artifacts (下载所有 zip 构建产物)
+      uses: actions/download-artifact@v4
       with:
-        fetch-depth: 1
+        path: out
 
-    - name: Cleanup Disk Space
+    - name: 📝 Preparing files for release (准备发布文件)
       run: |
-        sudo rm -rf /usr/share/dotnet
-        sudo rm -rf /opt/ghc
-        sudo rm -rf "/usr/local/share/boost"
-        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential git curl wget bison flex zip bc cpio libssl-dev ccache python-is-python3
-
-    - name: Setup Cache (ccache)
-      uses: actions/cache@v5
-      with:
-        path: ~/.cache/ccache_mikernel
-        key: kernel-ccache-${{ inputs.device }}-${{ inputs.script }}-${{ github.run_id }}
-        restore-keys: |
-          kernel-ccache-${{ inputs.device }}-${{ inputs.script }}-
-          kernel-ccache-${{ inputs.device }}-
-          kernel-ccache-
-
-    - name: Setup Toolchain (ZyC-Clang 15)
-      run: |
-        mkdir -p $HOME/zyc-clang
-        cd $HOME/zyc-clang
-        wget -q https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260507-release/Clang-15.0.7-20260507.tar.gz
-        tar -zxvf Clang-15.0.7-20260507.tar.gz
-
-    - name: Build Kernel
-      run: |
-        chmod +x build.sh build-miui.sh
-        
-        echo "Using script: ${{ inputs.script }}"
-
-        if [ "${{ inputs.ksu }}" == "true" ]; then
-          echo "Building with KernelSU..."
-          bash ${{ inputs.script }} ${{ inputs.device }} ksu
-        else
-          echo "Building without KernelSU..."
-          bash ${{ inputs.script }} ${{ inputs.device }}
+        mkdir -p release
+        cd /home/runner/work/kernel_xiaomi_sm8250_mod/kernel_xiaomi_sm8250_mod/out
+        device_list=()
+        for dir in */; do
+          device_name=$(echo "$dir" | sed 's/Kernel-//' | sed 's/\/$//')
+          echo "Found device: $device_name"
+          device_list+=("$device_name")
+          cd "$dir"
+        for zip_file in *; do
+          if [[ -f "$zip_file" && "$zip_file" == *.zip ]]; then
+          mv "$zip_file" /home/runner/work/kernel_xiaomi_sm8250_mod/kernel_xiaomi_sm8250_mod/release
         fi
+          done
+          cd ..
+        done
+        TARGET_DEVICES=$(echo "${device_list[*]}" | tr ' ' '-')
+        echo "TARGET_DEVICES=$TARGET_DEVICES" >> $GITHUB_ENV
 
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v6
+    - name: 📅 Setting date variables (设置日期变量)
+      run: |
+        echo "RELEASE_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
+        REPO_URL="https://github.com/yspbwx2010/kernel_xiaomi_sm8250_mod.git"
+        GIT_COMMIT_ID=$(git ls-remote $REPO_URL HEAD | cut -f1)
+        echo "GIT_COMMIT_ID=$GIT_COMMIT_ID" >> $GITHUB_ENV
+          
+    - name: 📤 Post to Release (发布到 Release)
+      uses: softprops/action-gh-release@v1
       with:
-        name: Kernel-${{ inputs.device }}-${{ inputs.script }}-${{ inputs.ksu && 'KSU' || 'NoKSU' }}-${{ github.run_number }}
-        path: ./*.zip
-        if-no-files-found: error
+        files: /home/runner/work/kernel_xiaomi_sm8250_mod/kernel_xiaomi_sm8250_mod/release/*.zip
+        name: ${{ github.event.inputs.kernel_version }}
+        tag_name: ${{ github.event.inputs.kernel_version }}
+        body: |
+          ### 📱kernel build information | 内核构建信息
+      
+          - **目标机型:** ${{ env.TARGET_DEVICES }}
+          - **适用系统:** ${{ github.event.inputs.compiled_system }}
+          - **KernelSU版本:** SukiSU-Ultra
+          - **KPM支持:** True
+          - **LXC支持:** ${{ github.event.inputs.lxc_enable }}
+          - **构建类型:** ${{ github.event.inputs.build_type }}
+          - **构建日期:** ${{ env.RELEASE_DATE }}
+          - **提交ID:** ${{ env.GIT_COMMIT_ID }}
+          - **完整发行版本号:** Kernel_(${{ env.TARGET_DEVICES }})_${{ github.event.inputs.kernelsu_variant }}_${{ github.event.inputs.compiled_system }}_${{ env.RELEASE_DATE }}_${{ github.event.inputs.kernel_version }}_${{ env.GIT_COMMIT_ID }}_${{ github.event.inputs.build_type }}
+
+          ### ⏫️ 更新日志 | Update Log
+          - 1.（占位符，待填写）
+      
+          ### 📋 安装方法 | Installation Guide
+          1. 若你的手机已经安装了第三方Recovery（如TWRP)，可下载对应机型的AnyKernel刷机包后进入Recovery模式，通过Recovery刷入刷机包后重启设备
+          2. 若你的手机之前已有 root 权限，可在手机上安装KernelFlasher，在KernelFlasher中刷入AnyKernel刷机包并重启
+          3. 若你之前已刷入SukiSU Ultra内核，且SukiSU Ultra管理器已更新至最新版本，可在SukiSU Ultra管理器中直接刷入AnyKernel刷机包并重启
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
