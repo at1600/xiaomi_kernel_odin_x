@@ -13,15 +13,15 @@ jobs:
 
     steps:
       - name: Build Kernel
-        uses: dabao1955/kernel_build_action@main
+        uses: at600/kernel_build_action@main
         with:
           kernel-url: https://github.com/at1600/xiaomi_kernel_odin_x
           kernel-dir: msm-5.4
           kernel-branch: main
           config: odin_defconfig
           arch: arm64
-          aosp-gcc: false
-          aosp-clang: false
+          aosp-gcc: true
+          aosp-clang: true
           android-version: 34
           aosp-clang-version: r450784d
           disable-lto: true
