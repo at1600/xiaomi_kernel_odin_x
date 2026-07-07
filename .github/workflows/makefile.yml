@@ -61,7 +61,7 @@ jobs:
         run: |
           mkdir -p prebuilts/clang/host/linux-x86
           cd prebuilts/clang/host/linux-x86
-          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/clang-r450784d/+archive/refs/heads/main.tar.gz -O clang.tar.gz
+          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz -O clang.tar.gz  
           mkdir clang-${{ env.CLANG_VER }}
           tar -xf clang.tar.gz -C clang-${{ env.CLANG_VER }}
           rm -f clang.tar.gz
