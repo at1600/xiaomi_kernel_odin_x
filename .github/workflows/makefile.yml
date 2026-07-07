@@ -18,8 +18,8 @@ on:
         default: arm64
 
 env:
-  ANDROID_VERSION: "34"
-  CLANG_VER: "r450784d"
+  ANDROID_VERSION: "32"
+  CLANG_VER: "r407598"
   KERNEL_ROOT: ${{ github.workspace }}
   BUILD_OUTPUT: out/kernel
 
