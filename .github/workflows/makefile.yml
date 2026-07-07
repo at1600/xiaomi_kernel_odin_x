@@ -21,7 +21,7 @@ jobs:
           config: odin_defconfig
           arch: arm64
           aosp-gcc: false
-          aosp-clang: true
+          aosp-clang: false
           android-version: 34
           aosp-clang-version: r450784d
           disable-lto: true
