@@ -1,28 +1,119 @@
-# A simple action usage
-name: Build Kernel
+name: Build GKI Kernel AOSP Clang r450784d
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - kernel
+  pull_request:
+  workflow_dispatch: # 手动触发
+
+env:
+  ANDROID_VERSION: "34"
+  CLANG_VER: "r450784d"
+  KERNEL_ROOT: ${{ github.workspace }}
+  TARGET_ARCH: arm64
+  TARGET_DEFCONFIG: gki_defconfig # 替换为你的设备defconfig
+  BUILD_OUTPUT: out/kernel
 
 jobs:
-  Build-Kernel:
-    strategy:
-      fail-fast: false
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
+  build:
+    runs-on: ubuntu-22.04
     steps:
-      - name: Build Kernel
-        uses: at600/kernel_build_action@main
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
         with:
-          kernel-url: https://github.com/at1600/xiaomi_kernel_odin_x
-          kernel-dir: msm-5.4
-          kernel-branch: main
-          config: odin_defconfig
-          arch: arm64
-          aosp-gcc: true
-          aosp-clang: true
-          android-version: 34
-          aosp-clang-version: r450784d
-          disable-lto: true
-          anykernel3: true
+          root-reserve-mb: 10240
+          swap-size-mb: 4096
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt update -y
+          sudo apt install -y build-essential libssl-dev libelf-dev bison flex bc git zip unzip wget curl python3 cpio rsync lz4
+
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 缓存 AOSP Clang + GCC 工具链，大幅提速
+      - name: Cache Prebuilt Toolchains
+        id: cache-toolchain
+        uses: actions/cache@v3
+        with:
+          path: |
+            prebuilts/clang/host/linux-x86/clang-${{ env.CLANG_VER }}
+            prebuilts/gcc/linux-x86/aarch64-linux-android-4.9
+            prebuilts/gcc/linux-x86/arm-linux-androideabi-4.9
+          key: toolchain-${{ env.CLANG_VER }}-android${{ env.ANDROID_VERSION }}
+
+      - name: Download AOSP Clang r450784d
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p prebuilts/clang/host/linux-x86
+          cd prebuilts/clang/host/linux-x86
+          wget -q https://dl.google.com/android/ndk/android-ndk-r26b-linux.zip
+          unzip -q android-ndk-r26b-linux.zip
+          mv android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64 clang-${{ env.CLANG_VER }}
+          rm -rf android-ndk-r26b android-ndk-r26b-linux.zip
+
+      - name: Download AOSP GCC 4.9 (aosp-gcc: true)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p prebuilts/gcc/linux-x86
+          cd prebuilts/gcc/linux-x86
+          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64-linux-android-4.9
+          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm-linux-androideabi-4.9
+
+      - name: Set Compile Env
+        run: |
+          echo "PATH=${{ github.workspace }}/prebuilts/clang/host/linux-x86/clang-${{ env.CLANG_VER }}/bin:${{ github.workspace }}/prebuilts/gcc/linux-x86/aarch64-linux-android-4.9/bin:$PATH" >> $GITHUB_ENV
+          echo "CLANG_PATH=${{ github.workspace }}/prebuilts/clang/host/linux-x86/clang-${{ env.CLANG_VER }}" >> $GITHUB_ENV
+          echo "GCC_PATH=${{ github.workspace }}/prebuilts/gcc/linux-x86/aarch64-linux-android-4.9" >> $GITHUB_ENV
+
+      - name: Show Toolchain Version
+        run: |
+          clang --version
+          aarch64-linux-android-gcc --version
+
+      - name: Clean Old Build
+        run: |
+          make -j$(nproc) clean
+          rm -rf ${{ env.BUILD_OUTPUT }}
+
+      - name: Generate GKI Defconfig
+        run: |
+          make O=${{ env.BUILD_OUTPUT }} ARCH=${{ env.TARGET_ARCH }} ${{ env.TARGET_DEFCONFIG }}
+          # 开启双编译器兼容配置，对应 aosp-gcc: true / aosp-clang: true
+          echo "CONFIG_CC_IS_CLANG=y" >> ${{ env.BUILD_OUTPUT }}/.config
+          echo "CONFIG_GCC_COMPAT=y" >> ${{ env.BUILD_OUTPUT }}/.config
+
+      - name: Build GKI Kernel Image
+        run: |
+          make -j$(nproc) O=${{ env.BUILD_OUTPUT }} \
+            ARCH=${{ env.TARGET_ARCH }} \
+            CC=clang CXX=clang++ AR=llvm-ar LD=ld.lld \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            Image Image.lz4 dtbo.img
+
+      - name: Generate Boot Image (GKI Standard)
+        run: |
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg
+          python3 mkbootimg/mkbootimg.py \
+            --kernel ${{ env.BUILD_OUTPUT }}/arch/arm64/boot/Image.lz4 \
+            --ramdisk empty \
+            --header_version 4 \
+            -o boot.img
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GKI-Boot-Android${{ env.ANDROID_VERSION }}-${{ env.CLANG_VER }}
+          path: |
+            boot.img
+            ${{ env.BUILD_OUTPUT }}/arch/arm64/boot/Image
+            ${{ env.BUILD_OUTPUT }}/arch/arm64/boot/dtbo.img
+            ${{ env.BUILD_OUTPUT }}/.config
