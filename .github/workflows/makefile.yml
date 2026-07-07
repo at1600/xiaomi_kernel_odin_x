@@ -20,7 +20,7 @@ jobs:
           kernel-branch: main
           config: odin_defconfig
           arch: arm64
-          aosp-gcc: true
+          aosp-gcc: false
           aosp-clang: true
           android-version: 34
           aosp-clang-version: r450784d
