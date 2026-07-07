@@ -1,25 +1,33 @@
 name: Build GKI Kernel AOSP Clang r450784d
+# 关键：必须写 workflow_dispatch 才能出现手动运行按钮
 on:
   push:
     branches:
       - main
       - kernel
   pull_request:
-  workflow_dispatch:
+  workflow_dispatch:  # 此行是手动触发开关，缺一不可
+    inputs:
+      target_defconfig:
+        description: 内核编译Defconfig
+        required: true
+        default: gki_defconfig
+      target_arch:
+        description: CPU架构 arm64/arm
+        required: true
+        default: arm64
 
 env:
   ANDROID_VERSION: "34"
   CLANG_VER: "r450784d"
   KERNEL_ROOT: ${{ github.workspace }}
-  TARGET_ARCH: arm64
-  TARGET_DEFCONFIG: gki_defconfig # 替换为你的设备defconfig
   BUILD_OUTPUT: out/kernel
 
 jobs:
-  build:
+  build_kernel:
     runs-on: ubuntu-22.04
     steps:
-      - name: Maximize build space
+      - name: 扩容磁盘空间
         uses: easimon/maximize-build-space@master
         with:
           root-reserve-mb: 10240
@@ -28,92 +36,77 @@ jobs:
           remove-android: true
           remove-haskell: true
 
-      - name: Install Build Dependencies
+      - name: 安装编译依赖
         run: |
           sudo apt update -y
           sudo apt install -y build-essential libssl-dev libelf-dev bison flex bc git zip unzip wget curl python3 cpio rsync lz4
 
-      - name: Checkout Kernel Source
+      - name: 拉取内核源码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      # 缓存 AOSP Clang + GCC 工具链，大幅提速
-      - name: Cache Prebuilt Toolchains
-        id: cache-toolchain
+      # 缓存工具链，解决工具链连接失败问题
+      - name: 缓存 Clang & GCC 工具链
+        id: cache_toolchain
         uses: actions/cache@v3
         with:
           path: |
             prebuilts/clang/host/linux-x86/clang-${{ env.CLANG_VER }}
             prebuilts/gcc/linux-x86/aarch64-linux-android-4.9
-            prebuilts/gcc/linux-x86/arm-linux-androideabi-4.9
-          key: toolchain-${{ env.CLANG_VER }}-android${{ env.ANDROID_VERSION }}
+          key: toolchain-${{ env.CLANG_VER }}-a34
 
-      - name: Download AOSP Clang r450784d
-        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+      - name: 下载 AOSP Clang r450784d
+        if: steps.cache_toolchain.outputs.cache-hit != 'true'
         run: |
           mkdir -p prebuilts/clang/host/linux-x86
           cd prebuilts/clang/host/linux-x86
-          wget -q https://dl.google.com/android/ndk/android-ndk-r26b-linux.zip
-          unzip -q android-ndk-r26b-linux.zip
-          mv android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64 clang-${{ env.CLANG_VER }}
-          rm -rf android-ndk-r26b android-ndk-r26b-linux.zip
+          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/clang-r450784d/+archive/refs/heads/main.tar.gz -O clang.tar.gz
+          mkdir clang-${{ env.CLANG_VER }}
+          tar -xf clang.tar.gz -C clang-${{ env.CLANG_VER }}
+          rm -f clang.tar.gz
 
-      - name: Download AOSP GCC 4.9 (aosp-gcc: true)
-        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+      - name: 下载 AOSP GCC 4.9 交叉编译器
+        if: steps.cache_toolchain.outputs.cache-hit != 'true'
         run: |
           mkdir -p prebuilts/gcc/linux-x86
-          cd prebuilts/gcc/linux-x86
           git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64-linux-android-4.9
-          git clone https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm-linux-androideabi-4.9
 
-      - name: Set Compile Env
+      - name: 导入编译环境变量
         run: |
           echo "PATH=${{ github.workspace }}/prebuilts/clang/host/linux-x86/clang-${{ env.CLANG_VER }}/bin:${{ github.workspace }}/prebuilts/gcc/linux-x86/aarch64-linux-android-4.9/bin:$PATH" >> $GITHUB_ENV
-          echo "CLANG_PATH=${{ github.workspace }}/prebuilts/clang/host/linux-x86/clang-${{ env.CLANG_VER }}" >> $GITHUB_ENV
-          echo "GCC_PATH=${{ github.workspace }}/prebuilts/gcc/linux-x86/aarch64-linux-android-4.9" >> $GITHUB_ENV
 
-      - name: Show Toolchain Version
-        run: |
-          clang --version
-          aarch64-linux-android-gcc --version
+      - name: 清理旧编译文件
+        run: make O=${{ env.BUILD_OUTPUT }} clean
 
-      - name: Clean Old Build
+      - name: 生成Defconfig
         run: |
-          make -j$(nproc) clean
-          rm -rf ${{ env.BUILD_OUTPUT }}
-
-      - name: Generate GKI Defconfig
-        run: |
-          make O=${{ env.BUILD_OUTPUT }} ARCH=${{ env.TARGET_ARCH }} ${{ env.TARGET_DEFCONFIG }}
-          # 开启双编译器兼容配置，对应 aosp-gcc: true / aosp-clang: true
+          make O=${{ env.BUILD_OUTPUT }} ARCH=${{ github.event.inputs.target_arch }} ${{ github.event.inputs.target_defconfig }}
           echo "CONFIG_CC_IS_CLANG=y" >> ${{ env.BUILD_OUTPUT }}/.config
           echo "CONFIG_GCC_COMPAT=y" >> ${{ env.BUILD_OUTPUT }}/.config
 
-      - name: Build GKI Kernel Image
+      - name: 编译GKI内核 Image + dtbo
         run: |
           make -j$(nproc) O=${{ env.BUILD_OUTPUT }} \
-            ARCH=${{ env.TARGET_ARCH }} \
-            CC=clang CXX=clang++ AR=llvm-ar LD=ld.lld \
+            ARCH=${{ github.event.inputs.target_arch }} \
+            CC=clang CXX=clang++ LD=ld.lld \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-android- \
             Image Image.lz4 dtbo.img
 
-      - name: Generate Boot Image (GKI Standard)
+      - name: 编译boot.img
         run: |
-          git clone https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg
-          python3 mkbootimg/mkbootimg.py \
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg mkboot
+          python3 mkboot/mkbootimg.py \
             --kernel ${{ env.BUILD_OUTPUT }}/arch/arm64/boot/Image.lz4 \
-            --ramdisk empty \
             --header_version 4 \
             -o boot.img
 
-      - name: Upload Artifacts
+      - name: 上传编译产物
         uses: actions/upload-artifact@v4
         with:
-          name: GKI-Boot-Android${{ env.ANDROID_VERSION }}-${{ env.CLANG_VER }}
+          name: GKI-Kernel-Output
           path: |
             boot.img
-            ${{ env.BUILD_OUTPUT }}/arch/arm64/boot/Image
             ${{ env.BUILD_OUTPUT }}/arch/arm64/boot/dtbo.img
             ${{ env.BUILD_OUTPUT }}/.config
