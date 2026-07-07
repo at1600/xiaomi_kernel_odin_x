@@ -5,7 +5,7 @@ on:
       - main
       - kernel
   pull_request:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
 
 env:
   ANDROID_VERSION: "34"
