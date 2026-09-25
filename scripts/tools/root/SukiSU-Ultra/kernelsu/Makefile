@@ -1,12 +1,24 @@
 kernelsu-objs := ksu.o
 kernelsu-objs += allowlist.o
+kernelsu-objs += dynamic_manager.o
+kernelsu-objs += app_profile.o
 kernelsu-objs += apk_sign.o
 kernelsu-objs += sucompat.o
+kernelsu-objs += syscall_hook_manager.o
 kernelsu-objs += throne_tracker.o
-kernelsu-objs += core_hook.o
+kernelsu-objs += pkg_observer.o
+kernelsu-objs += setuid_hook.o
+kernelsu-objs += lsm_hooks.o
+kernelsu-objs += kernel_compat.o
+kernelsu-objs += kernel_umount.o
+kernelsu-objs += supercalls.o
+kernelsu-objs += feature.o
+kernelsu-objs += throne_tracker.o
 kernelsu-objs += ksud.o
 kernelsu-objs += embed_ksud.o
-kernelsu-objs += kernel_compat.o
+kernelsu-objs += seccomp_cache.o
+kernelsu-objs += file_wrapper.o
+kernelsu-objs += throne_comm.o
 
 kernelsu-objs += selinux/selinux.o
 kernelsu-objs += selinux/sepolicy.o
@@ -15,21 +27,113 @@ kernelsu-objs += selinux/rules.o
 ccflags-y += -I$(srctree)/security/selinux -I$(srctree)/security/selinux/include
 ccflags-y += -I$(objtree)/security/selinux -include $(srctree)/include/uapi/asm-generic/errno.h
 
-ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-conversion
-ccflags-y += -Wno-declaration-after-statement -Wno-unused-function
-
 obj-$(CONFIG_KSU) += kernelsu.o
+obj-$(CONFIG_KSU_TRACEPOINT_HOOK) += ksu_trace_export.o
 
-obj-y += kpm/
+obj-$(CONFIG_KPM) += kpm/
 
-ccflags-y += -DKSU_VERSION=13000
+REPO_OWNER := SukiSU-Ultra
+REPO_NAME := SukiSU-Ultra
+REPO_BRANCH := main
+KSU_VERSION_API := 4.1.1
 
-ifndef KSU_EXPECTED_SIZE
-KSU_EXPECTED_SIZE := 0x35c
+KSU_VERSION := 40496
+KSU_VERSION_FULL := $(KSU_VERSION)
+
+ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
+ccflags-y += -DKSU_VERSION_FULL=\"$(KSU_VERSION_FULL)\"
+
+# RKSU: checks for available hook
+## Logic flipped for HAVE_KSU_HOOK: 0 is success, 1 is failure, but not with KSU_DRY_RUN
+HAVE_KSU_HOOK ?= 1
+KSU_DRY_RUN ?= 0
+
+# Checks hooks state
+ifeq ($(CONFIG_KSU_SHOULD_USE_NEW_TP), y)
+$(info -- KernelSU: SHOULD_USE_NEW_TP)
+ccflags-y += -DKSU_SHOULD_USE_NEW_TP
+# Let's make it 0, so it would pass.
+HAVE_KSU_HOOK := 0
 endif
 
-ifndef KSU_EXPECTED_HASH
-KSU_EXPECTED_HASH := 947ae944f3de4ed4c21a7e4f7953ecf351bfa2b36239da37a34111ad29993eef
+ifeq ($(CONFIG_KSU_MANUAL_HOOK), y)
+HAVE_KSU_HOOK := $(shell grep -q "ksu_handle_faccessat" $(srctree)/fs/open.c; echo $$?)
+ifeq ($(HAVE_KSU_HOOK),0)
+$(info -- KernelSU: CONFIG_KSU_MANUAL_HOOK)
+endif
+endif
+
+ifeq ($(KSU_DRY_RUN),0)
+ifneq ($(HAVE_KSU_HOOK),0)
+$(error -- KernelSU: No hooks were defined, bail!)
+endif
+else
+$(info -- KernelSU in dry run mode, skip hook checks)
+
+endif
+
+# SELinux drivers check
+ifeq ($(shell grep -q "current_sid(void)" $(srctree)/security/selinux/include/objsec.h; echo $$?),0)
+ccflags-y += -DKSU_COMPAT_HAS_CURRENT_SID
+endif
+ifeq ($(shell grep -q "struct selinux_state " $(srctree)/security/selinux/include/security.h; echo $$?),0)
+ccflags-y += -DKSU_COMPAT_HAS_SELINUX_STATE
+endif
+
+# Handle optional backports
+ifeq ($(shell grep -q "strncpy_from_user_nofault" $(srctree)/include/linux/uaccess.h; echo $$?),0)
+ccflags-y += -DKSU_OPTIONAL_STRNCPY
+endif
+ifeq ($(shell grep -q "ssize_t kernel_read" $(srctree)/fs/read_write.c; echo $$?),0)
+ccflags-y += -DKSU_OPTIONAL_KERNEL_READ
+endif
+ifeq ($(shell grep "ssize_t kernel_write" $(srctree)/fs/read_write.c | grep -q "const void" ; echo $$?),0)
+ccflags-y += -DKSU_OPTIONAL_KERNEL_WRITE
+endif
+ifeq ($(shell grep -q "int\s\+path_umount" $(srctree)/fs/namespace.c; echo $$?),0)
+ccflags-y += -DKSU_HAS_PATH_UMOUNT
+endif
+ifeq ($(shell grep -q "inode_security_struct\s\+\*selinux_inode" $(srctree)/security/selinux/include/objsec.h; echo $$?),0)
+ccflags-y += -DKSU_OPTIONAL_SELINUX_INODE
+endif
+ifeq ($(shell grep -q "task_security_struct\s\+\*selinux_cred" $(srctree)/security/selinux/include/objsec.h; echo $$?),0)
+ccflags-y += -DKSU_OPTIONAL_SELINUX_CRED
+endif
+# seccomp_types.h were added on 6.7
+ifeq ($(shell grep -q "atomic_t\s\+filter_count" $(srctree)/include/linux/seccomp.h $(srctree)/include/linux/seccomp_types.h; echo $$?),0)
+ccflags-y += -DKSU_OPTIONAL_SECCOMP_FILTER_CNT
+endif
+# some old kernel backport this, let's check if put_seccomp_filter still exist
+ifneq ($(shell grep -wq "put_seccomp_filter" $(srctree)/kernel/seccomp.c $(srctree)/include/linux/seccomp.h; echo $$?),0)
+ccflags-y += -DKSU_OPTIONAL_SECCOMP_FILTER_RELEASE
+endif
+ifeq ($(shell grep -q "anon_inode_getfd_secure" $(srctree)/fs/anon_inodes.c; echo $$?),0)
+ccflags-y += -DKSU_HAS_GETFD_SECURE
+endif
+ifeq ($(shell grep -A1 "^int vfs_getattr" $(srctree)/fs/stat.c | grep -q "query_flags"; echo $$?),0)
+ccflags-y += -DKSU_HAS_NEW_VFS_GETATTR
+endif
+
+# Checks Samsung
+ifeq ($(shell grep -q "CONFIG_KDP_CRED" $(srctree)/kernel/cred.c; echo $$?),0)
+ccflags-y += -DSAMSUNG_UH_DRIVER_EXIST
+endif
+ifeq ($(shell grep -q "SEC_SELINUX_PORTING_COMMON" $(srctree)/security/selinux/avc.c; echo $$?),0)
+ccflags-y += -DSAMSUNG_SELINUX_PORTING
+endif
+# Function proc_ops check
+ifeq ($(shell grep -q "struct proc_ops " $(srctree)/include/linux/proc_fs.h; echo $$?),0)
+ccflags-y += -DKSU_COMPAT_HAS_PROC_OPS
+endif
+
+# Custom Signs
+ifdef KSU_EXPECTED_SIZE
+ccflags-y += -DEXPECTED_SIZE=$(KSU_EXPECTED_SIZE)
+$(info -- Custom KernelSU Manager signature size: $(KSU_EXPECTED_SIZE))
+endif
+ifdef KSU_EXPECTED_HASH
+ccflags-y += -DEXPECTED_HASH=\"$(KSU_EXPECTED_HASH)\"
+$(info -- Custom KernelSU Manager signature hash: $(KSU_EXPECTED_HASH))
 endif
 
 ifdef KSU_MANAGER_PACKAGE
@@ -37,17 +141,8 @@ ccflags-y += -DKSU_MANAGER_PACKAGE=\"$(KSU_MANAGER_PACKAGE)\"
 $(info -- SukiSU Manager package name: $(KSU_MANAGER_PACKAGE))
 endif
 
-$(info -- SukiSU Manager signature size: $(KSU_EXPECTED_SIZE))
-$(info -- SukiSU Manager signature hash: $(KSU_EXPECTED_HASH))
-$(info -- Supported Unofficial Manager: 5ec1cff (GKI) rsuntk (Non-GKI) ShirkNeko udochina (GKI and non-GKI and KPM))
-
-ifeq ($(strip $(CONFIG_KSU_MANUAL_HOOK)),y)
-$(info -- SukiSU: Manual hooking enabled!)
-else
-$(info -- SukiSU: KPROBES hooking enabled!)
-ccflags-y += -DCONFIG_KSU_KPROBES_HOOK
-endif
-
+$(info -- Supported Unofficial Manager: 5ec1cff (GKI) ShirkNeko udochina (GKI and KPM))
+# Kernel version check
 KERNEL_VERSION := $(VERSION).$(PATCHLEVEL)
 KERNEL_TYPE := Non-GKI
 # Check for GKI 2.0 (5.10+ or 6.x+)
@@ -62,70 +157,14 @@ endif
 $(info -- KERNEL_VERSION: $(KERNEL_VERSION))
 $(info -- KERNEL_TYPE: $(KERNEL_TYPE))
 
-# Check if KPM is enabled
-ifeq ($(CONFIG_KPM),y)
+$(info -- KERNEL_VERSION: $(KERNEL_VERSION))
+ifeq ($(CONFIG_KPM), y)
 $(info -- KPM is enabled)
 else
 $(info -- KPM is disabled)
 endif
 
-# 写入签名
-ccflags-y += -DEXPECTED_SIZE=$(KSU_EXPECTED_SIZE)
-ccflags-y += -DEXPECTED_HASH=\"$(KSU_EXPECTED_HASH)\"
+ccflags-y += -Wno-strict-prototypes -Wno-int-conversion -Wno-gcc-compat
+ccflags-y += -Wno-declaration-after-statement -Wno-unused-function -Wno-missing-prototypes
 
-# SELinux 驱动程序检查
-ifeq ($(shell grep -q "current_sid(void)" $(srctree)/security/selinux/include/objsec.h; echo $$?),0)
-ccflags-y += -DKSU_COMPAT_HAS_CURRENT_SID
-endif
-
-ifeq ($(shell grep -q "struct selinux_state " $(srctree)/security/selinux/include/security.h; echo $$?),0)
-ccflags-y += -DKSU_COMPAT_HAS_SELINUX_STATE
-endif
-
-# 该功能在 linux 5.0-rc1 中引入
-ifeq ($(shell grep -q "get_cred_rcu" $(srctree)/include/linux/cred.h; echo $$?),0)
-ccflags-y += -DKSU_COMPAT_HAS_GET_CRED_RCU
-else
-ifeq ($(shell grep -q "atomic_long_t\s\+usage" $(srctree)/include/linux/cred.h; echo $$?),0)
-ccflags-y += -DKSU_COMPAT_ATOMIC_LONG
-endif
-ifeq ($(shell grep -q "int\s\+non_rcu" $(srctree)/include/linux/cred.h; echo $$?),0)
-ccflags-y += -DKSU_COMPAT_HAS_NONCONST_CRED
-endif
-endif
-
-# 处理可选的backport
-ifeq ($(shell grep -q "strncpy_from_user_nofault" $(srctree)/include/linux/uaccess.h; echo $$?),0)
-ccflags-y += -DKSU_STRNCPY_FROM_USER_NOFAULT
-endif
-
-ifeq ($(shell grep -q "ssize_t kernel_read" $(srctree)/fs/read_write.c; echo $$?),0)
-ccflags-y += -DKSU_KERNEL_READ
-endif
-
-ifeq ($(shell grep "ssize_t kernel_write" $(srctree)/fs/read_write.c | grep -q "const void" ; echo $$?),0)
-ccflags-y += -DKSU_KERNEL_WRITE
-endif
-
-# 检查三星 UH 驱动程序
-ifeq ($(shell grep -q "CONFIG_KDP_CRED" $(srctree)/kernel/cred.c; echo $$?),0)
-ccflags-y += -DSAMSUNG_UH_DRIVER_EXIST
-endif
-
-#ccflags-y += -DKSU_UMOUNT
-
-# Do checks before compile
-ifeq ($(shell grep -q "int\s\+path_umount" $(srctree)/fs/namespace.c; echo $$?),0)
-ccflags-y += -DKSU_HAS_PATH_UMOUNT
-endif
-
-## For susfs stuff ##
-ifeq ($(shell test -e $(srctree)/fs/susfs.c; echo $$?),0)
-$(eval SUSFS_VERSION=$(shell cat $(srctree)/include/linux/susfs.h | grep -E '^#define SUSFS_VERSION' | cut -d' ' -f3 | sed 's/"//g'))
-$(info )
-$(info -- SUSFS_VERSION: $(SUSFS_VERSION))
-else
-$(info -- You have not integrate susfs in your kernel.)
-$(info -- Read: https://gitlab.com/simonpunk/susfs4ksu)
-endif
 # Keep a new line here!! Because someone may append config

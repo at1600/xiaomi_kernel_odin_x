@@ -170,7 +170,11 @@ FILLDIR_RETURN_TYPE my_actor(struct dir_context *ctx, const char *name,
 	} else {
 		if ((namelen == 8) && (strncmp(name, "base.apk", namelen) == 0)) {
 			struct apk_path_hash *pos, *n;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0)
+			unsigned int hash = full_name_hash(dirpath, strlen(dirpath));
+#else
 			unsigned int hash = full_name_hash(NULL, dirpath, strlen(dirpath));
+#endif
 			list_for_each_entry(pos, &apk_path_hash_list, list) {
 				if (hash == pos->hash) {
 					pos->exists = true;
@@ -178,7 +182,7 @@ FILLDIR_RETURN_TYPE my_actor(struct dir_context *ctx, const char *name,
 				}
 			}
 
-			bool is_manager = ksu_is_manager_apk(dirpath);
+			bool is_manager = is_manager_apk(dirpath);
 			pr_info("Found new base.apk at path: %s, is_manager: %d\n",
 				dirpath, is_manager);
 			if (is_manager) {
@@ -220,7 +224,7 @@ void search_manager(const char *path, int depth, struct list_head *uid_data)
 	data.depth = depth;
 	list_add_tail(&data.list, &data_path_list);
 
-	for (i = depth; i >= 0; i--) {
+	for (i = depth; i > 0; i--) {
 		struct data_path *pos, *n;
 
 		list_for_each_entry_safe(pos, n, &data_path_list, list) {
@@ -236,13 +240,13 @@ void search_manager(const char *path, int depth, struct list_head *uid_data)
 				file = ksu_filp_open_compat(pos->dirpath, O_RDONLY | O_NOFOLLOW, 0);
 				if (IS_ERR(file)) {
 					pr_err("Failed to open directory: %s, err: %ld\n", pos->dirpath, PTR_ERR(file));
-					goto skip_iterate;
+					return;
 				}
 
 				iterate_dir(file, &ctx.ctx);
 				filp_close(file, NULL);
 			}
-skip_iterate:
+
 			list_del(&pos->list);
 			if (pos != &data)
 				kfree(pos);
@@ -274,7 +278,7 @@ static bool is_uid_exist(uid_t uid, char *package, void *data)
 	return exist;
 }
 
-void ksu_track_throne()
+void track_throne()
 {
 	struct file *fp =
 		ksu_filp_open_compat(SYSTEM_PACKAGES_LIST_PATH, O_RDONLY, 0);

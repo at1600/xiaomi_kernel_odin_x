@@ -8,17 +8,23 @@
 
 extern uid_t ksu_manager_uid; // DO NOT DIRECT USE
 
-static inline bool ksu_is_manager_uid_valid()
+extern bool ksu_is_any_manager(uid_t uid);
+extern void ksu_add_manager(uid_t uid, int signature_index);
+extern void ksu_remove_manager(uid_t uid);
+extern int ksu_get_manager_signature_index(uid_t uid);
+
+static inline bool ksu_is_manager_uid_valid(void)
 {
 	return ksu_manager_uid != KSU_INVALID_UID;
 }
 
-static inline bool ksu_is_manager()
+static inline bool is_manager(void)
 {
-	return unlikely(ksu_manager_uid == current_uid().val);
+	return unlikely(ksu_is_any_manager(current_uid().val) || 
+			(ksu_manager_uid != KSU_INVALID_UID && ksu_manager_uid == current_uid().val));
 }
 
-static inline uid_t ksu_get_manager_uid()
+static inline uid_t ksu_get_manager_uid(void)
 {
 	return ksu_manager_uid;
 }
@@ -28,9 +34,10 @@ static inline void ksu_set_manager_uid(uid_t uid)
 	ksu_manager_uid = uid;
 }
 
-static inline void ksu_invalidate_manager_uid()
+static inline void ksu_invalidate_manager_uid(void)
 {
 	ksu_manager_uid = KSU_INVALID_UID;
 }
 
+int ksu_observer_init(void);
 #endif

@@ -3,39 +3,19 @@
 
 #include <linux/fs.h>
 #include <linux/version.h>
-#include <linux/cred.h>
+#include <linux/task_work.h>
+#include <linux/fdtable.h>
 #include "ss/policydb.h"
 #include "linux/key.h"
-
-// for kernel without get_cred_rcu
-#ifndef KSU_COMPAT_HAS_GET_CRED_RCU
-static inline const struct cred *get_cred_rcu(const struct cred *cred)
-{
-	struct cred *nonconst_cred = (struct cred *) cred;
-	if (!cred)
-		return NULL;
-#ifdef KSU_COMPAT_ATOMIC_LONG
-	if (!atomic_long_inc_not_zero(&nonconst_cred->usage))
-#else
-	if (!atomic_inc_not_zero(&nonconst_cred->usage))
-#endif		
-		return NULL;
-	validate_creds(cred);
-#ifdef KSU_COMPAT_HAS_NONCONST_CRED
-	nonconst_cred->non_rcu = 0;
-#endif
-	return cred;
-}
-#endif
 
 /*
  * Adapt to Huawei HISI kernel without affecting other kernels ,
  * Huawei Hisi Kernel EBITMAP Enable or Disable Flag ,
  * From ss/ebitmap.h
  */
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)) &&                           \
-		(LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)) ||               \
-	(LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)) &&                      \
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)) &&                         \
+		(LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)) ||             \
+	(LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)) &&                    \
 		(LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0))
 #ifdef HISI_SELINUX_EBITMAP_RO
 #define CONFIG_IS_HW_HISI
@@ -53,17 +33,58 @@ extern long ksu_strncpy_from_user_nofault(char *dst,
 					  const void __user *unsafe_addr,
 					  long count);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) || defined(CONFIG_IS_HW_HISI) || defined(CONFIG_KSU_ALLOWLIST_WORKAROUND)
-extern struct key *init_session_keyring;
-#endif
-
-extern void ksu_android_ns_fs_check();
-extern int ksu_access_ok(const void *addr, unsigned long size);
 extern struct file *ksu_filp_open_compat(const char *filename, int flags,
 					 umode_t mode);
 extern ssize_t ksu_kernel_read_compat(struct file *p, void *buf, size_t count,
 				      loff_t *pos);
 extern ssize_t ksu_kernel_write_compat(struct file *p, const void *buf,
 				       size_t count, loff_t *pos);
+extern long ksu_copy_from_user_nofault(void *dst, const void __user *src, size_t size);
+/*
+ * ksu_copy_from_user_retry
+ * try nofault copy first, if it fails, try with plain
+ * paramters are the same as copy_from_user
+ * 0 = success
+ */
+static long ksu_copy_from_user_retry(void *to, 
+		const void __user *from, unsigned long count)
+{
+	long ret = ksu_copy_from_user_nofault(to, from, count);
+	if (likely(!ret))
+		return ret;
+
+	// we faulted! fallback to slow path
+	return copy_from_user(to, from, count);
+}
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) ||                           \
+	defined(CONFIG_IS_HW_HISI) || defined(CONFIG_KSU_ALLOWLIST_WORKAROUND)
+extern struct key *init_session_keyring;
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
+#define ksu_access_ok(addr, size) access_ok(addr, size)
+#else
+#define ksu_access_ok(addr, size) access_ok(VERIFY_READ, addr, size)
+#endif
+
+// Linux >= 5.7
+// task_work_add (struct, struct, enum)
+// Linux pre-5.7
+// task_work_add (struct, struct, bool)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
+#ifndef TWA_RESUME
+#define TWA_RESUME	true
+#endif
+#endif
+
+static inline int do_close_fd(unsigned int fd)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+	return close_fd(fd);
+#else
+	return __close_fd(current->files, fd);
+#endif
+}
 
 #endif
